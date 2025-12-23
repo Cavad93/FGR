@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Backtesting скрипт для оценки торговой стратегии BTC
-Стратегия:
-- Лонг BTC при индексе < 20, продажа при > 80
+Стратегия двухэтапная:
+1. Покупка: индекс < 20 → ждем EMA20(4h) пересекает EMA50(4h) снизу вверх
+2. Продажа: индекс > 80 → ждем EMA20(4h) пересекает EMA50(4h) сверху вниз
 """
 
 import requests
@@ -23,6 +24,20 @@ def get_session_without_proxy():
         'https': None,
     }
     return session
+
+
+def calculate_ema(data: pd.Series, period: int) -> pd.Series:
+    """
+    Расчет экспоненциальной скользящей средней (EMA)
+
+    Args:
+        data: Series с ценами
+        period: Период EMA
+
+    Returns:
+        Series с значениями EMA
+    """
+    return data.ewm(span=period, adjust=False).mean()
 
 
 class BinanceAPI:
@@ -144,27 +159,38 @@ class BTCTradingStrategy:
         self.long_buy_threshold = 20
         self.long_sell_threshold = 80
 
-    def backtest(self, price_data: pd.DataFrame, fng_data: pd.DataFrame) -> Dict:
+    def backtest(self, price_data_4h: pd.DataFrame, fng_data: pd.DataFrame) -> Dict:
         """
-        Выполнение бэктестинга стратегии
+        Выполнение бэктестинга стратегии с двухэтапными сигналами
 
         Args:
-            price_data: DataFrame с историческими ценами BTC
+            price_data_4h: DataFrame с 4-часовыми свечами BTC
             fng_data: DataFrame с индексом страха и жадности
 
         Returns:
             Словарь с результатами бэктестинга
         """
-        # Объединение данных по датам
-        price_data['date'] = price_data['timestamp'].dt.date
+        # Рассчитываем EMA на 4-часовых данных
+        price_data_4h['ema_20'] = calculate_ema(price_data_4h['close'], 20)
+        price_data_4h['ema_50'] = calculate_ema(price_data_4h['close'], 50)
+
+        # Для каждой 4-часовой свечи находим актуальный индекс страха
+        price_data_4h['date'] = price_data_4h['timestamp'].dt.date
         fng_data['date'] = fng_data['timestamp'].dt.date
 
+        # Объединяем данные
         merged_data = pd.merge(
-            price_data,
+            price_data_4h,
             fng_data[['date', 'fear_greed_index']],
             on='date',
-            how='inner'
+            how='left'
         )
+
+        # Заполняем пропущенные значения индекса страха методом forward fill
+        merged_data['fear_greed_index'] = merged_data['fear_greed_index'].fillna(method='ffill')
+
+        # Удаляем строки с NaN в EMA (первые 50 строк)
+        merged_data = merged_data.dropna(subset=['ema_20', 'ema_50']).reset_index(drop=True)
 
         # Инициализация переменных
         cash = self.initial_capital
@@ -173,11 +199,22 @@ class BTCTradingStrategy:
         portfolio_values = []
         in_long = False
 
+        # Флаги ожидания сигналов
+        waiting_for_buy_signal = False   # Ожидание пересечения EMA для покупки
+        waiting_for_sell_signal = False  # Ожидание пересечения EMA для продажи
+
         # Симуляция торговли
-        for idx, row in merged_data.iterrows():
+        for idx in range(1, len(merged_data)):
+            row = merged_data.iloc[idx]
+            prev_row = merged_data.iloc[idx - 1]
+
             date = row['timestamp']
             price = row['close']
             fng_index = row['fear_greed_index']
+            ema_20 = row['ema_20']
+            ema_50 = row['ema_50']
+            prev_ema_20 = prev_row['ema_20']
+            prev_ema_50 = prev_row['ema_50']
 
             # Расчет текущей стоимости портфеля
             portfolio_value = cash + (btc_holdings * price)
@@ -189,45 +226,72 @@ class BTCTradingStrategy:
                 'fng_index': fng_index,
                 'cash': cash,
                 'btc_holdings': btc_holdings,
-                'position_type': 'LONG' if in_long else 'NONE'
+                'position_type': 'LONG' if in_long else 'WAITING_BUY' if waiting_for_buy_signal else 'WAITING_SELL' if waiting_for_sell_signal else 'NONE',
+                'ema_20': ema_20,
+                'ema_50': ema_50
             })
 
-            # ЛОНГ: Сигнал на покупку при индексе < 20
-            if fng_index < self.long_buy_threshold and not in_long and cash > 0:
-                btc_amount = cash / price
-                trades.append({
-                    'date': date,
-                    'type': 'BUY LONG',
-                    'price': price,
-                    'amount': btc_amount,
-                    'value': cash,
-                    'fng_index': fng_index
-                })
-                btc_holdings = btc_amount
-                cash = 0
-                in_long = True
-                print(f"   📈 {date.strftime('%Y-%m-%d')}: ЛОНГ открыт при индексе {fng_index}, цена ${price:,.2f}")
+            # Логика покупки (двухэтапная)
+            if not in_long:
+                # Шаг 1: Индекс опустился ниже 20 - активируем ожидание
+                if fng_index < self.long_buy_threshold:
+                    if not waiting_for_buy_signal:
+                        waiting_for_buy_signal = True
+                        print(f"   🔔 {date.strftime('%Y-%m-%d %H:%M')}: Сигнал 1/2 - индекс {fng_index} < 20, ожидаем пересечения EMA...")
 
-            # ЛОНГ: Сигнал на продажу при индексе > 80
-            elif fng_index > self.long_sell_threshold and in_long and btc_holdings > 0:
-                sell_value = btc_holdings * price
-                trades.append({
-                    'date': date,
-                    'type': 'SELL LONG',
-                    'price': price,
-                    'amount': btc_holdings,
-                    'value': sell_value,
-                    'fng_index': fng_index
-                })
-                cash = sell_value
-                btc_holdings = 0
-                in_long = False
-                print(f"   📉 {date.strftime('%Y-%m-%d')}: ЛОНГ закрыт при индексе {fng_index}, цена ${price:,.2f}")
+                # Шаг 2: EMA20 пересекает EMA50 снизу вверх (GOLDEN CROSS)
+                if waiting_for_buy_signal and cash > 0:
+                    if prev_ema_20 <= prev_ema_50 and ema_20 > ema_50:
+                        btc_amount = cash / price
+                        trades.append({
+                            'date': date,
+                            'type': 'BUY LONG',
+                            'price': price,
+                            'amount': btc_amount,
+                            'value': cash,
+                            'fng_index': fng_index,
+                            'ema_20': ema_20,
+                            'ema_50': ema_50
+                        })
+                        btc_holdings = btc_amount
+                        cash = 0
+                        in_long = True
+                        waiting_for_buy_signal = False
+                        print(f"   📈 {date.strftime('%Y-%m-%d %H:%M')}: ЛОНГ открыт! EMA20 пересекла EMA50 вверх, цена ${price:,.2f}")
+
+            # Логика продажи (двухэтапная)
+            if in_long:
+                # Шаг 1: Индекс поднялся выше 80 - активируем ожидание
+                if fng_index > self.long_sell_threshold:
+                    if not waiting_for_sell_signal:
+                        waiting_for_sell_signal = True
+                        print(f"   🔔 {date.strftime('%Y-%m-%d %H:%M')}: Сигнал 1/2 - индекс {fng_index} > 80, ожидаем пересечения EMA...")
+
+                # Шаг 2: EMA20 пересекает EMA50 сверху вниз (DEATH CROSS)
+                if waiting_for_sell_signal and btc_holdings > 0:
+                    if prev_ema_20 >= prev_ema_50 and ema_20 < ema_50:
+                        sell_value = btc_holdings * price
+                        trades.append({
+                            'date': date,
+                            'type': 'SELL LONG',
+                            'price': price,
+                            'amount': btc_holdings,
+                            'value': sell_value,
+                            'fng_index': fng_index,
+                            'ema_20': ema_20,
+                            'ema_50': ema_50
+                        })
+                        cash = sell_value
+                        btc_holdings = 0
+                        in_long = False
+                        waiting_for_sell_signal = False
+                        print(f"   📉 {date.strftime('%Y-%m-%d %H:%M')}: ЛОНГ закрыт! EMA20 пересекла EMA50 вниз, цена ${price:,.2f}")
 
         # Закрытие позиций в конце периода
-        final_price = merged_data.iloc[-1]['close']
-        final_fng = merged_data.iloc[-1]['fear_greed_index']
-        final_date = merged_data.iloc[-1]['timestamp']
+        final_row = merged_data.iloc[-1]
+        final_price = final_row['close']
+        final_fng = final_row['fear_greed_index']
+        final_date = final_row['timestamp']
 
         if btc_holdings > 0:
             final_value = btc_holdings * final_price
@@ -326,7 +390,12 @@ def print_results(stats: Dict, trades: List):
 
     print("\n📊 ПАРАМЕТРЫ СТРАТЕГИИ:")
     print(f"   Стартовый капитал: ${stats['initial_capital']:,.2f}")
-    print(f"   ЛОНГ: Покупка при индексе < 20, продажа при > 80")
+    print(f"   ПОКУПКА (2 этапа):")
+    print(f"      1) Индекс страха < 20 → активация сигнала")
+    print(f"      2) EMA20(4h) пересекает EMA50(4h) снизу вверх → ПОКУПКА")
+    print(f"   ПРОДАЖА (2 этапа):")
+    print(f"      1) Индекс страха > 80 → активация сигнала")
+    print(f"      2) EMA20(4h) пересекает EMA50(4h) сверху вниз → ПРОДАЖА")
 
     print("\n💰 ФИНАНСОВЫЕ РЕЗУЛЬТАТЫ:")
     print(f"   Финальный капитал: ${stats['final_capital']:,.2f}")
@@ -365,11 +434,11 @@ def print_results(stats: Dict, trades: List):
 
 def main():
     """Основная функция"""
-    print("🚀 Запуск бэктестинга торговой стратегии BTC (ЛОНГ)...")
+    print("🚀 Запуск бэктестинга торговой стратегии BTC (ЛОНГ с EMA)...")
 
     # Параметры
     symbol = "BTCUSDT"
-    interval = "1d"
+    interval_4h = "4h"  # 4-часовой интервал для EMA
     start_date = "2020-01-01"
     end_date = "2025-12-01"
     initial_capital = 1000.0
@@ -381,15 +450,16 @@ def main():
     print(f"\n📅 Период: {start_date} - {end_date}")
     print(f"💵 Стартовый капитал: ${initial_capital}")
     print(f"📊 Актив: BTC")
+    print(f"⏱️  Таймфрейм: 4 часа (для EMA)")
 
-    # Получение данных BTC с Binance
-    print(f"\n📊 Получение данных {symbol} с Binance...")
+    # Получение 4-часовых данных BTC с Binance
+    print(f"\n📊 Получение 4-часовых данных {symbol} с Binance...")
     binance = BinanceAPI()
-    klines = binance.get_historical_klines(symbol, interval, start_timestamp, end_timestamp)
-    price_data = binance.klines_to_dataframe(klines)
-    print(f"✅ Получено {len(price_data)} дневных свечей")
+    klines_4h = binance.get_historical_klines(symbol, interval_4h, start_timestamp, end_timestamp)
+    price_data_4h = binance.klines_to_dataframe(klines_4h)
+    print(f"✅ Получено {len(price_data_4h)} 4-часовых свечей")
 
-    if price_data.empty:
+    if price_data_4h.empty:
         print("❌ Не удалось загрузить данные BTC. Проверьте подключение к интернету.")
         return
 
@@ -405,13 +475,16 @@ def main():
 
     # Выполнение бэктестинга
     print(f"\n⚡ Выполнение бэктестинга стратегии...")
-    print(f"   ЛОНГ: индекс < 20 → покупка, индекс > 80 → продажа")
+    print(f"   Шаг 1 (Покупка): индекс < 20 → ожидание")
+    print(f"   Шаг 2 (Покупка): EMA20(4h) пересекает EMA50(4h) снизу вверх → покупка")
+    print(f"   Шаг 1 (Продажа): индекс > 80 → ожидание")
+    print(f"   Шаг 2 (Продажа): EMA20(4h) пересекает EMA50(4h) сверху вниз → продажа")
     strategy = BTCTradingStrategy(initial_capital)
-    backtest_results = strategy.backtest(price_data, fng_data)
+    backtest_results = strategy.backtest(price_data_4h, fng_data)
 
     # Расчет статистики
     print(f"\n📈 Расчет статистики...")
-    stats = strategy.calculate_statistics(backtest_results, price_data)
+    stats = strategy.calculate_statistics(backtest_results, price_data_4h)
 
     # Вывод результатов
     print_results(stats, backtest_results['trades'])
@@ -420,13 +493,17 @@ def main():
     output_file = "backtesting_results_btc.json"
     results_to_save = {
         'parameters': {
-            'strategy': 'BTC Long based on Fear & Greed Index',
+            'strategy': 'BTC Long with 2-Step Signal: Fear & Greed + EMA Cross',
             'symbol': symbol,
             'start_date': start_date,
             'end_date': end_date,
             'initial_capital': initial_capital,
-            'long_buy_threshold': 20,
-            'long_sell_threshold': 80
+            'timeframe': '4h',
+            'buy_step1': 'Fear & Greed Index < 20',
+            'buy_step2': 'EMA20(4h) crosses above EMA50(4h)',
+            'sell_step1': 'Fear & Greed Index > 80',
+            'sell_step2': 'EMA20(4h) crosses below EMA50(4h)',
+            'ema_periods': {'ema_fast': 20, 'ema_slow': 50}
         },
         'statistics': {k: v for k, v in stats.items() if k != 'portfolio_values'},
         'trades': backtest_results['trades']
