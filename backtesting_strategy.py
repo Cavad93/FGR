@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Backtesting скрипт для оценки торговой стратегии BTC
-Стратегия двухэтапная:
-1. Покупка: индекс < 20 → ждем EMA20(4h) пересекает EMA50(4h) снизу вверх
-2. Продажа: индекс > 80 → ждем EMA20(4h) пересекает EMA50(4h) сверху вниз
+Сравнение двух стратегий:
+- Стратегия А: индекс < 25 / > 75 + EMA пересечения
+- Стратегия Б: индекс < 30 / > 70 + EMA пересечения
 """
 
 import requests
@@ -153,11 +153,11 @@ class FearGreedAPI:
 class BTCTradingStrategy:
     """Класс для реализации торговой стратегии BTC с лонг позициями"""
 
-    def __init__(self, initial_capital: float = 1000.0):
+    def __init__(self, initial_capital: float = 1000.0, buy_threshold: int = 25, sell_threshold: int = 75):
         self.initial_capital = initial_capital
         # Пороги для лонг позиций
-        self.long_buy_threshold = 20
-        self.long_sell_threshold = 80
+        self.long_buy_threshold = buy_threshold
+        self.long_sell_threshold = sell_threshold
 
     def backtest(self, price_data_4h: pd.DataFrame, fng_data: pd.DataFrame) -> Dict:
         """
@@ -233,11 +233,11 @@ class BTCTradingStrategy:
 
             # Логика покупки (двухэтапная)
             if not in_long:
-                # Шаг 1: Индекс опустился ниже 20 - активируем ожидание
+                # Шаг 1: Индекс опустился ниже порога - активируем ожидание
                 if fng_index < self.long_buy_threshold:
                     if not waiting_for_buy_signal:
                         waiting_for_buy_signal = True
-                        print(f"   🔔 {date.strftime('%Y-%m-%d %H:%M')}: Сигнал 1/2 - индекс {fng_index} < 20, ожидаем пересечения EMA...")
+                        print(f"   🔔 {date.strftime('%Y-%m-%d %H:%M')}: Сигнал 1/2 - индекс {fng_index} < {self.long_buy_threshold}, ожидаем пересечения EMA...")
 
                 # Шаг 2: EMA20 пересекает EMA50 снизу вверх (GOLDEN CROSS)
                 if waiting_for_buy_signal and cash > 0:
@@ -261,11 +261,11 @@ class BTCTradingStrategy:
 
             # Логика продажи (двухэтапная)
             if in_long:
-                # Шаг 1: Индекс поднялся выше 80 - активируем ожидание
+                # Шаг 1: Индекс поднялся выше порога - активируем ожидание
                 if fng_index > self.long_sell_threshold:
                     if not waiting_for_sell_signal:
                         waiting_for_sell_signal = True
-                        print(f"   🔔 {date.strftime('%Y-%m-%d %H:%M')}: Сигнал 1/2 - индекс {fng_index} > 80, ожидаем пересечения EMA...")
+                        print(f"   🔔 {date.strftime('%Y-%m-%d %H:%M')}: Сигнал 1/2 - индекс {fng_index} > {self.long_sell_threshold}, ожидаем пересечения EMA...")
 
                 # Шаг 2: EMA20 пересекает EMA50 сверху вниз (DEATH CROSS)
                 if waiting_for_sell_signal and btc_holdings > 0:
@@ -382,19 +382,20 @@ class BTCTradingStrategy:
         }
 
 
-def print_results(stats: Dict, trades: List):
+def print_results(stats: Dict, trades: List, buy_threshold: int, sell_threshold: int, strategy_name: str = ""):
     """Вывод результатов бэктестинга"""
     print("\n" + "="*80)
-    print("РЕЗУЛЬТАТЫ БЭКТЕСТИНГА ТОРГОВОЙ СТРАТЕГИИ BTC (ЛОНГ)")
+    title = f"РЕЗУЛЬТАТЫ БЭКТЕСТИНГА: {strategy_name}" if strategy_name else "РЕЗУЛЬТАТЫ БЭКТЕСТИНГА"
+    print(title)
     print("="*80)
 
     print("\n📊 ПАРАМЕТРЫ СТРАТЕГИИ:")
     print(f"   Стартовый капитал: ${stats['initial_capital']:,.2f}")
     print(f"   ПОКУПКА (2 этапа):")
-    print(f"      1) Индекс страха < 20 → активация сигнала")
+    print(f"      1) Индекс страха < {buy_threshold} → активация сигнала")
     print(f"      2) EMA20(4h) пересекает EMA50(4h) снизу вверх → ПОКУПКА")
     print(f"   ПРОДАЖА (2 этапа):")
-    print(f"      1) Индекс страха > 80 → активация сигнала")
+    print(f"      1) Индекс страха > {sell_threshold} → активация сигнала")
     print(f"      2) EMA20(4h) пересекает EMA50(4h) сверху вниз → ПРОДАЖА")
 
     print("\n💰 ФИНАНСОВЫЕ РЕЗУЛЬТАТЫ:")
@@ -432,9 +433,42 @@ def print_results(stats: Dict, trades: List):
     print("\n" + "="*80)
 
 
+def print_comparison(stats_a: Dict, stats_b: Dict, name_a: str, name_b: str):
+    """Вывод сравнения двух стратегий"""
+    print("\n" + "="*80)
+    print("📊 СРАВНЕНИЕ СТРАТЕГИЙ")
+    print("="*80)
+
+    print(f"\n{'Метрика':<40} {name_a:<20} {name_b:<20}")
+    print("-" * 80)
+    print(f"{'Финальный капитал':<40} ${stats_a['final_capital']:>18,.2f} ${stats_b['final_capital']:>18,.2f}")
+    print(f"{'Доходность':<40} {stats_a['strategy_return']:>18.2f}% {stats_b['strategy_return']:>18.2f}%")
+    print(f"{'Всего сделок':<40} {stats_a['total_trades']:>20} {stats_b['total_trades']:>20}")
+    print(f"{'Win Rate':<40} {stats_a['win_rate']:>18.2f}% {stats_b['win_rate']:>18.2f}%")
+    print(f"{'Максимальная просадка':<40} {stats_a['max_drawdown']:>18.2f}% {stats_b['max_drawdown']:>18.2f}%")
+    print(f"{'Превосходство над HODL':<40} {stats_a['outperformance']:>18.2f}% {stats_b['outperformance']:>18.2f}%")
+
+    # Определяем победителя
+    print("\n" + "="*80)
+    if stats_a['strategy_return'] > stats_b['strategy_return']:
+        winner = name_a
+        diff = stats_a['strategy_return'] - stats_b['strategy_return']
+        print(f"🏆 ПОБЕДИТЕЛЬ: {winner} (+{diff:.2f}% доходности)")
+    elif stats_b['strategy_return'] > stats_a['strategy_return']:
+        winner = name_b
+        diff = stats_b['strategy_return'] - stats_a['strategy_return']
+        print(f"🏆 ПОБЕДИТЕЛЬ: {winner} (+{diff:.2f}% доходности)")
+    else:
+        print(f"🤝 НИЧЬЯ: Обе стратегии показали одинаковую доходность")
+
+    print("="*80)
+
+
 def main():
     """Основная функция"""
-    print("🚀 Запуск бэктестинга торговой стратегии BTC (ЛОНГ с EMA)...")
+    print("🚀 Сравнение двух стратегий BTC (ЛОНГ с EMA)...")
+    print("   Стратегия А: индекс < 25 / > 75 + EMA пересечения")
+    print("   Стратегия Б: индекс < 30 / > 70 + EMA пересечения")
 
     # Параметры
     symbol = "BTCUSDT"
@@ -473,58 +507,97 @@ def main():
         print("❌ Не удалось загрузить данные индекса страха и жадности.")
         return
 
-    # Выполнение бэктестинга
-    print(f"\n⚡ Выполнение бэктестинга стратегии...")
-    print(f"   Шаг 1 (Покупка): индекс < 20 → ожидание")
-    print(f"   Шаг 2 (Покупка): EMA20(4h) пересекает EMA50(4h) снизу вверх → покупка")
-    print(f"   Шаг 1 (Продажа): индекс > 80 → ожидание")
-    print(f"   Шаг 2 (Продажа): EMA20(4h) пересекает EMA50(4h) сверху вниз → продажа")
-    strategy = BTCTradingStrategy(initial_capital)
-    backtest_results = strategy.backtest(price_data_4h, fng_data)
+    # ==================== СТРАТЕГИЯ А: 25/75 ====================
+    print(f"\n" + "="*80)
+    print("⚡ СТРАТЕГИЯ А: Покупка < 25, Продажа > 75")
+    print("="*80)
+    strategy_a = BTCTradingStrategy(initial_capital, buy_threshold=25, sell_threshold=75)
+    backtest_a = strategy_a.backtest(price_data_4h.copy(), fng_data.copy())
 
-    # Расчет статистики
     print(f"\n📈 Расчет статистики...")
-    stats = strategy.calculate_statistics(backtest_results, price_data_4h)
+    stats_a = strategy_a.calculate_statistics(backtest_a, price_data_4h)
 
-    # Вывод результатов
-    print_results(stats, backtest_results['trades'])
+    print_results(stats_a, backtest_a['trades'], 25, 75, "Стратегия А (25/75)")
 
-    # Сохранение результатов
-    output_file = "backtesting_results_btc.json"
-    results_to_save = {
+    # ==================== СТРАТЕГИЯ Б: 30/70 ====================
+    print(f"\n" + "="*80)
+    print("⚡ СТРАТЕГИЯ Б: Покупка < 30, Продажа > 70")
+    print("="*80)
+    strategy_b = BTCTradingStrategy(initial_capital, buy_threshold=30, sell_threshold=70)
+    backtest_b = strategy_b.backtest(price_data_4h.copy(), fng_data.copy())
+
+    print(f"\n📈 Расчет статистики...")
+    stats_b = strategy_b.calculate_statistics(backtest_b, price_data_4h)
+
+    print_results(stats_b, backtest_b['trades'], 30, 70, "Стратегия Б (30/70)")
+
+    # ==================== СРАВНЕНИЕ ====================
+    print_comparison(stats_a, stats_b, "Стратегия А (25/75)", "Стратегия Б (30/70)")
+
+    # Сохранение результатов СТРАТЕГИИ А
+    output_file_a = "backtesting_results_strategy_A_25_75.json"
+    results_a = {
         'parameters': {
-            'strategy': 'BTC Long with 2-Step Signal: Fear & Greed + EMA Cross',
+            'strategy': 'Strategy A: Fear < 25 / > 75 + EMA Cross',
             'symbol': symbol,
             'start_date': start_date,
             'end_date': end_date,
             'initial_capital': initial_capital,
             'timeframe': '4h',
-            'buy_step1': 'Fear & Greed Index < 20',
-            'buy_step2': 'EMA20(4h) crosses above EMA50(4h)',
-            'sell_step1': 'Fear & Greed Index > 80',
-            'sell_step2': 'EMA20(4h) crosses below EMA50(4h)',
+            'buy_threshold': 25,
+            'sell_threshold': 75,
             'ema_periods': {'ema_fast': 20, 'ema_slow': 50}
         },
-        'statistics': {k: v for k, v in stats.items() if k != 'portfolio_values'},
-        'trades': backtest_results['trades']
+        'statistics': {k: v for k, v in stats_a.items() if k != 'portfolio_values'},
+        'trades': backtest_a['trades']
     }
 
-    # Конвертация datetime в строки
-    for trade in results_to_save['trades']:
+    for trade in results_a['trades']:
         trade['date'] = trade['date'].strftime('%Y-%m-%d %H:%M:%S')
 
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(results_to_save, f, indent=2, ensure_ascii=False, default=str)
+    with open(output_file_a, 'w', encoding='utf-8') as f:
+        json.dump(results_a, f, indent=2, ensure_ascii=False, default=str)
 
-    print(f"\n💾 Результаты сохранены в файл: {output_file}")
+    print(f"\n💾 Результаты Стратегии А сохранены в: {output_file_a}")
 
-    # Сохранение CSV
-    if not stats['portfolio_values'].empty:
-        csv_file = "portfolio_history_btc.csv"
-        stats['portfolio_values'].to_csv(csv_file, index=False)
-        print(f"💾 История портфеля сохранена в файл: {csv_file}")
+    # Сохранение результатов СТРАТЕГИИ Б
+    output_file_b = "backtesting_results_strategy_B_30_70.json"
+    results_b = {
+        'parameters': {
+            'strategy': 'Strategy B: Fear < 30 / > 70 + EMA Cross',
+            'symbol': symbol,
+            'start_date': start_date,
+            'end_date': end_date,
+            'initial_capital': initial_capital,
+            'timeframe': '4h',
+            'buy_threshold': 30,
+            'sell_threshold': 70,
+            'ema_periods': {'ema_fast': 20, 'ema_slow': 50}
+        },
+        'statistics': {k: v for k, v in stats_b.items() if k != 'portfolio_values'},
+        'trades': backtest_b['trades']
+    }
 
-    print("\n✅ Бэктестинг завершен успешно!")
+    for trade in results_b['trades']:
+        trade['date'] = trade['date'].strftime('%Y-%m-%d %H:%M:%S')
+
+    with open(output_file_b, 'w', encoding='utf-8') as f:
+        json.dump(results_b, f, indent=2, ensure_ascii=False, default=str)
+
+    print(f"💾 Результаты Стратегии Б сохранены в: {output_file_b}")
+
+    # Сохранение CSV для обеих стратегий
+    if not stats_a['portfolio_values'].empty:
+        csv_file_a = "portfolio_history_strategy_A_25_75.csv"
+        stats_a['portfolio_values'].to_csv(csv_file_a, index=False)
+        print(f"💾 История портфеля Стратегии А: {csv_file_a}")
+
+    if not stats_b['portfolio_values'].empty:
+        csv_file_b = "portfolio_history_strategy_B_30_70.csv"
+        stats_b['portfolio_values'].to_csv(csv_file_b, index=False)
+        print(f"💾 История портфеля Стратегии Б: {csv_file_b}")
+
+    print("\n✅ Сравнение стратегий завершено успешно!")
 
 
 if __name__ == "__main__":
