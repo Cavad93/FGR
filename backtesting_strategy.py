@@ -39,22 +39,17 @@ class CoinGeckoAPI:
     }
 
     @staticmethod
-    def get_top_coins(date: datetime, limit: int = 50) -> List[str]:
+    def get_top_coins_with_supply(limit: int = 50) -> Dict[str, float]:
         """
-        Получение топ монет по капитализации (исключая стейблкоины)
+        Получение топ монет с их circulating supply (исключая стейблкоины)
 
         Args:
-            date: Дата для получения рейтинга
-            limit: Сколько монет запросить (потом отфильтруем стейблкоины)
+            limit: Сколько монет запросить
 
         Returns:
-            Список символов топ-20 монет (без стейблкоинов)
+            Словарь {symbol: circulating_supply}
         """
         session = get_session_without_proxy()
-
-        # CoinGecko не имеет исторического API для топ монет в бесплатной версии
-        # Поэтому используем текущий топ и предполагаем, что основные монеты
-        # (BTC, ETH и т.д.) были в топе на протяжении всего периода
 
         try:
             url = f"{CoinGeckoAPI.BASE_URL}/coins/markets"
@@ -70,8 +65,8 @@ class CoinGeckoAPI:
             response.raise_for_status()
             data = response.json()
 
-            # Фильтруем стейблкоины
-            top_coins = []
+            # Фильтруем стейблкоины и собираем данные
+            coins_data = {}
             for coin in data:
                 symbol = coin['symbol'].lower()
                 name = coin['name'].lower()
@@ -83,24 +78,25 @@ class CoinGeckoAPI:
                         is_stablecoin = True
                         break
 
-                if not is_stablecoin:
-                    top_coins.append(coin['symbol'].upper())
-
-                # Собираем ровно 20 монет
-                if len(top_coins) >= 20:
-                    break
+                if not is_stablecoin and coin.get('circulating_supply'):
+                    coins_data[coin['symbol'].upper()] = float(coin['circulating_supply'])
 
             time.sleep(1.5)  # Rate limit для CoinGecko API
-            return top_coins[:20]
+            return coins_data
 
         except Exception as e:
-            print(f"Ошибка при получении топ монет CoinGecko: {e}")
-            # Возвращаем резервный список топ-20 монет (известные на 2020-2025)
-            return [
-                'BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'SOL', 'DOGE', 'DOT',
-                'MATIC', 'LTC', 'SHIB', 'TRX', 'AVAX', 'UNI', 'LINK',
-                'ATOM', 'XMR', 'ETC', 'BCH', 'XLM'
-            ]
+            print(f"Ошибка при получении данных монет CoinGecko: {e}")
+            # Возвращаем резервный список с примерными supply
+            # (это приблизительные значения для демонстрации)
+            return {
+                'BTC': 19500000, 'ETH': 120000000, 'BNB': 157000000,
+                'XRP': 52000000000, 'ADA': 35000000000, 'SOL': 400000000,
+                'DOGE': 140000000000, 'DOT': 1200000000, 'MATIC': 9000000000,
+                'LTC': 73000000, 'SHIB': 589000000000000, 'TRX': 88000000000,
+                'AVAX': 350000000, 'UNI': 750000000, 'LINK': 500000000,
+                'ATOM': 290000000, 'XMR': 18000000, 'ETC': 140000000,
+                'BCH': 19500000, 'XLM': 27000000000
+            }
 
 
 class BinanceAPI:
@@ -248,14 +244,15 @@ class PortfolioTradingStrategy:
         self.sell_threshold = sell_threshold
         self.allocation_per_coin = 0.05  # 5% на каждую монету
 
-    def backtest(self, coins_data: Dict[str, pd.DataFrame], fng_data: pd.DataFrame, top_coins: List[str]) -> Dict:
+    def backtest(self, coins_data: Dict[str, pd.DataFrame], fng_data: pd.DataFrame,
+                 coins_supply: Dict[str, float]) -> Dict:
         """
         Выполнение бэктестинга стратегии с портфелем монет
 
         Args:
             coins_data: Словарь {symbol: DataFrame с ценами}
             fng_data: DataFrame с индексом страха и жадности
-            top_coins: Список топ-20 монет для покупки
+            coins_supply: Словарь {symbol: circulating_supply}
 
         Returns:
             Словарь с результатами бэктестинга
@@ -312,34 +309,52 @@ class PortfolioTradingStrategy:
 
             # Сигнал на покупку: индекс == 20 и нет позиции
             if fng_index == self.buy_threshold and not in_position and cash > 0:
+                # Определяем топ-20 монет на текущую дату по капитализации
+                market_caps = []
+                for symbol, supply in coins_supply.items():
+                    if symbol in current_prices:
+                        price = current_prices[symbol]
+                        market_cap = price * supply
+                        market_caps.append({
+                            'symbol': symbol,
+                            'market_cap': market_cap,
+                            'price': price
+                        })
+
+                # Сортируем по капитализации и берем топ-20
+                market_caps.sort(key=lambda x: x['market_cap'], reverse=True)
+                top_20_on_date = market_caps[:20]
+
+                print(f"   📈 {timestamp.strftime('%Y-%m-%d')}: Топ-20 монет на дату: {', '.join([c['symbol'] for c in top_20_on_date[:10]])}...")
+
                 # Покупаем топ-20 монет по 5% капитала на каждую
                 amount_per_coin = cash * self.allocation_per_coin
 
                 coins_bought = []
                 total_spent = 0
 
-                for symbol in top_coins:
-                    if symbol in current_prices:
-                        price = current_prices[symbol]
-                        coin_amount = amount_per_coin / price
-                        portfolio[symbol] = coin_amount
+                for coin_info in top_20_on_date:
+                    symbol = coin_info['symbol']
+                    price = coin_info['price']
+                    coin_amount = amount_per_coin / price
+                    portfolio[symbol] = coin_amount
 
-                        trades.append({
-                            'date': timestamp,
-                            'type': 'BUY',
-                            'symbol': symbol,
-                            'price': price,
-                            'amount': coin_amount,
-                            'value': amount_per_coin,
-                            'fng_index': fng_index
-                        })
+                    trades.append({
+                        'date': timestamp,
+                        'type': 'BUY',
+                        'symbol': symbol,
+                        'price': price,
+                        'amount': coin_amount,
+                        'value': amount_per_coin,
+                        'fng_index': fng_index
+                    })
 
-                        coins_bought.append(symbol)
-                        total_spent += amount_per_coin
+                    coins_bought.append(symbol)
+                    total_spent += amount_per_coin
 
                 cash -= total_spent
                 in_position = True
-                print(f"   📈 {timestamp.strftime('%Y-%m-%d')}: Куплено {len(coins_bought)} монет при индексе {fng_index}")
+                print(f"   ✅ Куплено {len(coins_bought)} монет при индексе {fng_index}")
 
             # Сигнал на продажу: индекс == 80 и есть позиции
             elif fng_index == self.sell_threshold and in_position and portfolio:
@@ -579,15 +594,16 @@ def main():
     print(f"💵 Стартовый капитал: ${initial_capital}")
     print(f"📊 Стратегия: покупка топ-20 монет по 5% каждая")
 
-    # Получение топ-20 монет
-    print(f"\n🏆 Получение топ-20 монет (без стейблкоинов)...")
+    # Получение топ монет с их circulating supply
+    print(f"\n🏆 Получение топ-50 монет с данными о supply (без стейблкоинов)...")
     coingecko = CoinGeckoAPI()
-    top_coins = coingecko.get_top_coins(datetime.now(), limit=50)
-    print(f"✅ Топ-20 монет: {', '.join(top_coins)}")
+    coins_supply = coingecko.get_top_coins_with_supply(limit=50)
+    all_symbols = list(coins_supply.keys())
+    print(f"✅ Получено {len(all_symbols)} монет: {', '.join(all_symbols[:10])}... (+{len(all_symbols)-10} монет)")
 
     # Получение данных для всех монет
-    print(f"\n📊 Получение исторических данных для {len(top_coins)} монет с Binance...")
-    coins_data = BinanceAPI.get_multiple_coins_data(top_coins, interval, start_timestamp, end_timestamp)
+    print(f"\n📊 Получение исторических данных для {len(all_symbols)} монет с Binance...")
+    coins_data = BinanceAPI.get_multiple_coins_data(all_symbols, interval, start_timestamp, end_timestamp)
     print(f"✅ Загружено данных для {len(coins_data)} монет")
 
     if not coins_data:
@@ -606,8 +622,9 @@ def main():
 
     # Выполнение бэктестинга
     print(f"\n⚡ Выполнение бэктестинга стратегии...")
+    print(f"   На каждую дату покупки (индекс = 20) будет определяться топ-20 по капитализации")
     strategy = PortfolioTradingStrategy(initial_capital, buy_threshold, sell_threshold)
-    backtest_results = strategy.backtest(coins_data, fng_data, top_coins)
+    backtest_results = strategy.backtest(coins_data, fng_data, coins_supply)
 
     # Расчет статистики
     print(f"\n📈 Расчет статистики...")
@@ -618,9 +635,18 @@ def main():
 
     # Сохранение результатов
     output_file = "backtesting_results_top20.json"
+
+    # Собираем уникальные монеты, которые были куплены во всех циклах
+    all_bought_coins = set()
+    for trade in backtest_results['trades']:
+        if trade['type'] == 'BUY':
+            all_bought_coins.add(trade['symbol'])
+
     results_to_save = {
         'parameters': {
-            'top_coins': top_coins,
+            'strategy': 'Dynamic TOP-20 selection on buy signal',
+            'coins_pool_size': len(all_symbols),
+            'all_bought_coins': sorted(list(all_bought_coins)),
             'start_date': start_date,
             'end_date': end_date,
             'initial_capital': initial_capital,
