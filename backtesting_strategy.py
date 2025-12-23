@@ -3,7 +3,6 @@
 Backtesting скрипт для оценки торговой стратегии BTC
 Стратегия:
 - Лонг BTC при индексе < 20, продажа при > 80
-- Шорт BTC при индексе > 85 (плечо 1), закрытие при < 25
 """
 
 import requests
@@ -137,17 +136,13 @@ class FearGreedAPI:
 
 
 class BTCTradingStrategy:
-    """Класс для реализации торговой стратегии BTC с лонг и шорт позициями"""
+    """Класс для реализации торговой стратегии BTC с лонг позициями"""
 
     def __init__(self, initial_capital: float = 1000.0):
         self.initial_capital = initial_capital
         # Пороги для лонг позиций
         self.long_buy_threshold = 20
         self.long_sell_threshold = 80
-        # Пороги для шорт позиций
-        self.short_open_threshold = 85
-        self.short_close_threshold = 25
-        self.leverage = 1  # Плечо для шорта
 
     def backtest(self, price_data: pd.DataFrame, fng_data: pd.DataFrame) -> Dict:
         """
@@ -173,13 +168,10 @@ class BTCTradingStrategy:
 
         # Инициализация переменных
         cash = self.initial_capital
-        btc_holdings = 0.0  # Для лонг позиций
-        short_position = 0.0  # Для шорт позиций (в BTC)
-        short_entry_price = 0.0  # Цена входа в шорт
+        btc_holdings = 0.0
         trades = []
         portfolio_values = []
         in_long = False
-        in_short = False
 
         # Симуляция торговли
         for idx, row in merged_data.iterrows():
@@ -190,12 +182,6 @@ class BTCTradingStrategy:
             # Расчет текущей стоимости портфеля
             portfolio_value = cash + (btc_holdings * price)
 
-            # Если есть шорт позиция, рассчитываем P&L
-            if in_short:
-                # P&L = (цена входа - текущая цена) × количество BTC в шорте
-                short_pnl = (short_entry_price - price) * short_position
-                portfolio_value = cash + short_pnl
-
             portfolio_values.append({
                 'date': date,
                 'portfolio_value': portfolio_value,
@@ -203,11 +189,11 @@ class BTCTradingStrategy:
                 'fng_index': fng_index,
                 'cash': cash,
                 'btc_holdings': btc_holdings,
-                'position_type': 'LONG' if in_long else ('SHORT' if in_short else 'NONE')
+                'position_type': 'LONG' if in_long else 'NONE'
             })
 
             # ЛОНГ: Сигнал на покупку при индексе < 20
-            if fng_index < self.long_buy_threshold and not in_long and not in_short and cash > 0:
+            if fng_index < self.long_buy_threshold and not in_long and cash > 0:
                 btc_amount = cash / price
                 trades.append({
                     'date': date,
@@ -238,47 +224,6 @@ class BTCTradingStrategy:
                 in_long = False
                 print(f"   📉 {date.strftime('%Y-%m-%d')}: ЛОНГ закрыт при индексе {fng_index}, цена ${price:,.2f}")
 
-            # ШОРТ: Открытие шорт позиции при индексе > 85
-            elif fng_index > self.short_open_threshold and not in_long and not in_short and cash > 0:
-                # Открываем шорт на весь капитал с плечом 1
-                # Занимаем BTC и продаем его
-                short_btc_amount = cash / price * self.leverage
-                short_position = short_btc_amount
-                short_entry_price = price
-
-                trades.append({
-                    'date': date,
-                    'type': 'OPEN SHORT',
-                    'price': price,
-                    'amount': short_btc_amount,
-                    'value': cash,
-                    'fng_index': fng_index
-                })
-                in_short = True
-                print(f"   🔻 {date.strftime('%Y-%m-%d')}: ШОРТ открыт при индексе {fng_index}, цена ${price:,.2f}")
-
-            # ШОРТ: Закрытие шорт позиции при индексе < 25
-            elif fng_index < self.short_close_threshold and in_short and short_position > 0:
-                # Закрываем шорт: выкупаем BTC
-                buyback_cost = short_position * price
-                profit = cash - buyback_cost
-                final_cash = cash + profit
-
-                trades.append({
-                    'date': date,
-                    'type': 'CLOSE SHORT',
-                    'price': price,
-                    'amount': short_position,
-                    'value': final_cash,
-                    'fng_index': fng_index,
-                    'profit': profit
-                })
-                cash = final_cash
-                short_position = 0
-                short_entry_price = 0
-                in_short = False
-                print(f"   🔺 {date.strftime('%Y-%m-%d')}: ШОРТ закрыт при индексе {fng_index}, цена ${price:,.2f}, P&L: ${profit:,.2f}")
-
         # Закрытие позиций в конце периода
         final_price = merged_data.iloc[-1]['close']
         final_fng = merged_data.iloc[-1]['fear_greed_index']
@@ -297,22 +242,6 @@ class BTCTradingStrategy:
             cash = final_value
             btc_holdings = 0
 
-        if short_position > 0:
-            buyback_cost = short_position * final_price
-            profit = cash - buyback_cost
-            final_cash = cash + profit
-            trades.append({
-                'date': final_date,
-                'type': 'CLOSE SHORT (Final)',
-                'price': final_price,
-                'amount': short_position,
-                'value': final_cash,
-                'fng_index': final_fng,
-                'profit': profit
-            })
-            cash = final_cash
-            short_position = 0
-
         return {
             'trades': trades,
             'portfolio_values': portfolio_values,
@@ -327,8 +256,6 @@ class BTCTradingStrategy:
         # Разделяем сделки по типам
         long_buy_trades = [t for t in trades if t['type'] == 'BUY LONG']
         long_sell_trades = [t for t in trades if 'SELL LONG' in t['type']]
-        short_open_trades = [t for t in trades if t['type'] == 'OPEN SHORT']
-        short_close_trades = [t for t in trades if 'CLOSE SHORT' in t['type']]
 
         # Расчет прибыльных сделок для лонгов
         profitable_longs = 0
@@ -346,24 +273,8 @@ class BTCTradingStrategy:
             else:
                 total_long_loss += abs(profit_pct)
 
-        # Расчет прибыльных сделок для шортов
-        profitable_shorts = 0
-        total_short_profit = 0
-        total_short_loss = 0
-
-        for i in range(min(len(short_open_trades), len(short_close_trades))):
-            open_price = short_open_trades[i]['price']
-            close_price = short_close_trades[i]['price']
-            profit_pct = (open_price - close_price) / open_price * 100  # Для шорта обратная логика
-
-            if profit_pct > 0:
-                profitable_shorts += 1
-                total_short_profit += profit_pct
-            else:
-                total_short_loss += abs(profit_pct)
-
-        total_cycles = len(long_buy_trades) + len(short_open_trades)
-        profitable_cycles = profitable_longs + profitable_shorts
+        total_cycles = len(long_buy_trades)
+        profitable_cycles = profitable_longs
         win_rate = (profitable_cycles / total_cycles * 100) if total_cycles > 0 else 0
 
         # Максимальная просадка
@@ -391,11 +302,8 @@ class BTCTradingStrategy:
         return {
             'total_trades': len(trades),
             'long_cycles': len(long_buy_trades),
-            'short_cycles': len(short_open_trades),
             'total_cycles': total_cycles,
             'profitable_cycles': profitable_cycles,
-            'profitable_longs': profitable_longs,
-            'profitable_shorts': profitable_shorts,
             'win_rate': win_rate,
             'max_drawdown': max_drawdown,
             'initial_capital': self.initial_capital,
@@ -406,8 +314,6 @@ class BTCTradingStrategy:
             'outperformance': strategy_return - hodl_return,
             'long_profit_pct': total_long_profit,
             'long_loss_pct': total_long_loss,
-            'short_profit_pct': total_short_profit,
-            'short_loss_pct': total_short_loss,
             'portfolio_values': portfolio_values
         }
 
@@ -415,13 +321,12 @@ class BTCTradingStrategy:
 def print_results(stats: Dict, trades: List):
     """Вывод результатов бэктестинга"""
     print("\n" + "="*80)
-    print("РЕЗУЛЬТАТЫ БЭКТЕСТИНГА ТОРГОВОЙ СТРАТЕГИИ BTC (ЛОНГ + ШОРТ)")
+    print("РЕЗУЛЬТАТЫ БЭКТЕСТИНГА ТОРГОВОЙ СТРАТЕГИИ BTC (ЛОНГ)")
     print("="*80)
 
     print("\n📊 ПАРАМЕТРЫ СТРАТЕГИИ:")
     print(f"   Стартовый капитал: ${stats['initial_capital']:,.2f}")
     print(f"   ЛОНГ: Покупка при индексе < 20, продажа при > 80")
-    print(f"   ШОРТ: Открытие при индексе > 85, закрытие при < 25 (плечо 1)")
 
     print("\n💰 ФИНАНСОВЫЕ РЕЗУЛЬТАТЫ:")
     print(f"   Финальный капитал: ${stats['final_capital']:,.2f}")
@@ -441,8 +346,6 @@ def print_results(stats: Dict, trades: List):
     print("\n📊 СТАТИСТИКА СДЕЛОК:")
     print(f"   Всего сделок: {stats['total_trades']}")
     print(f"   Циклов ЛОНГ: {stats['long_cycles']}")
-    print(f"   Циклов ШОРТ: {stats['short_cycles']}")
-    print(f"   Всего циклов: {stats['total_cycles']}")
     print(f"   Прибыльных циклов: {stats['profitable_cycles']}")
     print(f"   Win Rate: {stats['win_rate']:.2f}%")
 
@@ -452,18 +355,17 @@ def print_results(stats: Dict, trades: List):
     print("\n📋 ДЕТАЛИ СДЕЛОК:")
     print("-" * 80)
     for i, trade in enumerate(trades, 1):
-        profit_str = f" | P&L: ${trade['profit']:,.2f}" if 'profit' in trade else ""
         print(f"{i}. {trade['date'].strftime('%Y-%m-%d')} | {trade['type']:20} | "
               f"Цена: ${trade['price']:,.2f} | "
               f"Сумма: ${trade['value']:,.2f} | "
-              f"FG: {trade['fng_index']}{profit_str}")
+              f"FG: {trade['fng_index']}")
 
     print("\n" + "="*80)
 
 
 def main():
     """Основная функция"""
-    print("🚀 Запуск бэктестинга торговой стратегии BTC (ЛОНГ + ШОРТ)...")
+    print("🚀 Запуск бэктестинга торговой стратегии BTC (ЛОНГ)...")
 
     # Параметры
     symbol = "BTCUSDT"
@@ -504,7 +406,6 @@ def main():
     # Выполнение бэктестинга
     print(f"\n⚡ Выполнение бэктестинга стратегии...")
     print(f"   ЛОНГ: индекс < 20 → покупка, индекс > 80 → продажа")
-    print(f"   ШОРТ: индекс > 85 → открытие, индекс < 25 → закрытие")
     strategy = BTCTradingStrategy(initial_capital)
     backtest_results = strategy.backtest(price_data, fng_data)
 
@@ -519,16 +420,13 @@ def main():
     output_file = "backtesting_results_btc.json"
     results_to_save = {
         'parameters': {
-            'strategy': 'BTC Long/Short based on Fear & Greed Index',
+            'strategy': 'BTC Long based on Fear & Greed Index',
             'symbol': symbol,
             'start_date': start_date,
             'end_date': end_date,
             'initial_capital': initial_capital,
-            'long_buy': 20,
-            'long_sell': 80,
-            'short_open': 85,
-            'short_close': 25,
-            'leverage': 1
+            'long_buy_threshold': 20,
+            'long_sell_threshold': 80
         },
         'statistics': {k: v for k, v in stats.items() if k != 'portfolio_values'},
         'trades': backtest_results['trades']
