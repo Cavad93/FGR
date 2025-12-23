@@ -2,8 +2,8 @@
 """
 Backtesting скрипт для оценки торговой стратегии BTC
 Стратегия:
-- Лонг BTC при индексе = 20, продажа при = 80
-- Шорт BTC при индексе = 85 (плечо 1), закрытие при = 25
+- Лонг BTC при индексе < 20, продажа при > 80
+- Шорт BTC при индексе > 85 (плечо 1), закрытие при < 25
 """
 
 import requests
@@ -206,8 +206,8 @@ class BTCTradingStrategy:
                 'position_type': 'LONG' if in_long else ('SHORT' if in_short else 'NONE')
             })
 
-            # ЛОНГ: Сигнал на покупку при индексе = 20
-            if fng_index == self.long_buy_threshold and not in_long and not in_short and cash > 0:
+            # ЛОНГ: Сигнал на покупку при индексе < 20
+            if fng_index < self.long_buy_threshold and not in_long and not in_short and cash > 0:
                 btc_amount = cash / price
                 trades.append({
                     'date': date,
@@ -222,8 +222,8 @@ class BTCTradingStrategy:
                 in_long = True
                 print(f"   📈 {date.strftime('%Y-%m-%d')}: ЛОНГ открыт при индексе {fng_index}, цена ${price:,.2f}")
 
-            # ЛОНГ: Сигнал на продажу при индексе = 80
-            elif fng_index == self.long_sell_threshold and in_long and btc_holdings > 0:
+            # ЛОНГ: Сигнал на продажу при индексе > 80
+            elif fng_index > self.long_sell_threshold and in_long and btc_holdings > 0:
                 sell_value = btc_holdings * price
                 trades.append({
                     'date': date,
@@ -238,8 +238,8 @@ class BTCTradingStrategy:
                 in_long = False
                 print(f"   📉 {date.strftime('%Y-%m-%d')}: ЛОНГ закрыт при индексе {fng_index}, цена ${price:,.2f}")
 
-            # ШОРТ: Открытие шорт позиции при индексе = 85
-            elif fng_index == self.short_open_threshold and not in_long and not in_short and cash > 0:
+            # ШОРТ: Открытие шорт позиции при индексе > 85
+            elif fng_index > self.short_open_threshold and not in_long and not in_short and cash > 0:
                 # Открываем шорт на весь капитал с плечом 1
                 # Занимаем BTC и продаем его
                 short_btc_amount = cash / price * self.leverage
@@ -257,8 +257,8 @@ class BTCTradingStrategy:
                 in_short = True
                 print(f"   🔻 {date.strftime('%Y-%m-%d')}: ШОРТ открыт при индексе {fng_index}, цена ${price:,.2f}")
 
-            # ШОРТ: Закрытие шорт позиции при индексе = 25
-            elif fng_index == self.short_close_threshold and in_short and short_position > 0:
+            # ШОРТ: Закрытие шорт позиции при индексе < 25
+            elif fng_index < self.short_close_threshold and in_short and short_position > 0:
                 # Закрываем шорт: выкупаем BTC
                 buyback_cost = short_position * price
                 profit = cash - buyback_cost
@@ -420,8 +420,8 @@ def print_results(stats: Dict, trades: List):
 
     print("\n📊 ПАРАМЕТРЫ СТРАТЕГИИ:")
     print(f"   Стартовый капитал: ${stats['initial_capital']:,.2f}")
-    print(f"   ЛОНГ: Покупка при индексе = 20, продажа при = 80")
-    print(f"   ШОРТ: Открытие при индексе = 85, закрытие при = 25 (плечо 1)")
+    print(f"   ЛОНГ: Покупка при индексе < 20, продажа при > 80")
+    print(f"   ШОРТ: Открытие при индексе > 85, закрытие при < 25 (плечо 1)")
 
     print("\n💰 ФИНАНСОВЫЕ РЕЗУЛЬТАТЫ:")
     print(f"   Финальный капитал: ${stats['final_capital']:,.2f}")
@@ -503,8 +503,8 @@ def main():
 
     # Выполнение бэктестинга
     print(f"\n⚡ Выполнение бэктестинга стратегии...")
-    print(f"   ЛОНГ: индекс = 20 → покупка, индекс = 80 → продажа")
-    print(f"   ШОРТ: индекс = 85 → открытие, индекс = 25 → закрытие")
+    print(f"   ЛОНГ: индекс < 20 → покупка, индекс > 80 → продажа")
+    print(f"   ШОРТ: индекс > 85 → открытие, индекс < 25 → закрытие")
     strategy = BTCTradingStrategy(initial_capital)
     backtest_results = strategy.backtest(price_data, fng_data)
 
