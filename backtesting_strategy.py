@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Backtesting скрипт для оценки торговой стратегии на основе индекса страха и жадности
+Стратегия: покупка топ-20 криптовалют при индексе = 20, продажа при индексе = 80
 """
 
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set
 import json
 import os
 
@@ -21,6 +22,85 @@ def get_session_without_proxy():
         'https': None,
     }
     return session
+
+
+class CoinGeckoAPI:
+    """Класс для работы с CoinGecko API"""
+
+    BASE_URL = "https://api.coingecko.com/api/v3"
+
+    # Список известных стейблкоинов для исключения
+    STABLECOINS = {
+        'usdt', 'usdc', 'busd', 'dai', 'tusd', 'usdd', 'usdp', 'gusd',
+        'frax', 'lusd', 'susd', 'usdn', 'ust', 'husd', 'pax', 'usdj',
+        'cusd', 'eurs', 'eurt', 'ustc', 'fei', 'tribe', 'ousd', 'musd',
+        'nusd', 'dusd', 'vai', 'usx', 'dola', 'bean', 'mim', 'usdd',
+        'usdk', 'RSV', 'flex usd', 'true usd', 'paxos standard'
+    }
+
+    @staticmethod
+    def get_top_coins(date: datetime, limit: int = 50) -> List[str]:
+        """
+        Получение топ монет по капитализации (исключая стейблкоины)
+
+        Args:
+            date: Дата для получения рейтинга
+            limit: Сколько монет запросить (потом отфильтруем стейблкоины)
+
+        Returns:
+            Список символов топ-20 монет (без стейблкоинов)
+        """
+        session = get_session_without_proxy()
+
+        # CoinGecko не имеет исторического API для топ монет в бесплатной версии
+        # Поэтому используем текущий топ и предполагаем, что основные монеты
+        # (BTC, ETH и т.д.) были в топе на протяжении всего периода
+
+        try:
+            url = f"{CoinGeckoAPI.BASE_URL}/coins/markets"
+            params = {
+                'vs_currency': 'usd',
+                'order': 'market_cap_desc',
+                'per_page': limit,
+                'page': 1,
+                'sparkline': False
+            }
+
+            response = session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            # Фильтруем стейблкоины
+            top_coins = []
+            for coin in data:
+                symbol = coin['symbol'].lower()
+                name = coin['name'].lower()
+
+                # Проверяем, не является ли монета стейблкоином
+                is_stablecoin = False
+                for stable in CoinGeckoAPI.STABLECOINS:
+                    if stable in symbol or stable in name:
+                        is_stablecoin = True
+                        break
+
+                if not is_stablecoin:
+                    top_coins.append(coin['symbol'].upper())
+
+                # Собираем ровно 20 монет
+                if len(top_coins) >= 20:
+                    break
+
+            time.sleep(1.5)  # Rate limit для CoinGecko API
+            return top_coins[:20]
+
+        except Exception as e:
+            print(f"Ошибка при получении топ монет CoinGecko: {e}")
+            # Возвращаем резервный список топ-20 монет (известные на 2020-2025)
+            return [
+                'BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'SOL', 'DOGE', 'DOT',
+                'MATIC', 'LTC', 'SHIB', 'TRX', 'AVAX', 'UNI', 'LINK',
+                'ATOM', 'XMR', 'ETC', 'BCH', 'XLM'
+            ]
 
 
 class BinanceAPI:
@@ -68,14 +148,17 @@ class BinanceAPI:
                 time.sleep(0.5)  # Задержка для избежания rate limit
 
             except Exception as e:
-                print(f"Ошибка при получении данных Binance: {e}")
+                print(f"Ошибка при получении данных {symbol} с Binance: {e}")
                 break
 
         return all_klines
 
     @staticmethod
-    def klines_to_dataframe(klines: List) -> pd.DataFrame:
+    def klines_to_dataframe(klines: List, symbol: str) -> pd.DataFrame:
         """Конвертация свечей в DataFrame"""
+        if not klines:
+            return pd.DataFrame()
+
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
             'close_time', 'quote_volume', 'trades', 'taker_buy_base',
@@ -84,12 +167,38 @@ class BinanceAPI:
 
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df['close'] = df['close'].astype(float)
-        df['open'] = df['open'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['volume'] = df['volume'].astype(float)
+        df['symbol'] = symbol
 
-        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        return df[['timestamp', 'symbol', 'close']]
+
+    @staticmethod
+    def get_multiple_coins_data(symbols: List[str], interval: str, start_time: int, end_time: int) -> Dict[str, pd.DataFrame]:
+        """
+        Получение данных для нескольких монет
+
+        Args:
+            symbols: Список символов (например, ['BTC', 'ETH', 'BNB'])
+            interval: Интервал
+            start_time: Время начала
+            end_time: Время окончания
+
+        Returns:
+            Словарь {symbol: DataFrame с ценами}
+        """
+        all_data = {}
+
+        for symbol in symbols:
+            trading_pair = f"{symbol}USDT"
+            print(f"   Загрузка {trading_pair}...")
+
+            klines = BinanceAPI.get_historical_klines(trading_pair, interval, start_time, end_time)
+            if klines:
+                df = BinanceAPI.klines_to_dataframe(klines, symbol)
+                all_data[symbol] = df
+            else:
+                print(f"   ⚠️  Не удалось загрузить данные для {trading_pair}")
+
+        return all_data
 
 
 class FearGreedAPI:
@@ -130,161 +239,238 @@ class FearGreedAPI:
             return pd.DataFrame()
 
 
-class TradingStrategy:
-    """Класс для реализации торговой стратегии"""
+class PortfolioTradingStrategy:
+    """Класс для реализации торговой стратегии с портфелем из топ-20 монет"""
 
     def __init__(self, initial_capital: float = 1000.0, buy_threshold: int = 20, sell_threshold: int = 80):
         self.initial_capital = initial_capital
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
+        self.allocation_per_coin = 0.05  # 5% на каждую монету
 
-    def backtest(self, price_data: pd.DataFrame, fng_data: pd.DataFrame) -> Dict:
+    def backtest(self, coins_data: Dict[str, pd.DataFrame], fng_data: pd.DataFrame, top_coins: List[str]) -> Dict:
         """
-        Выполнение бэктестинга стратегии
+        Выполнение бэктестинга стратегии с портфелем монет
 
         Args:
-            price_data: DataFrame с историческими ценами BTC
+            coins_data: Словарь {symbol: DataFrame с ценами}
             fng_data: DataFrame с индексом страха и жадности
+            top_coins: Список топ-20 монет для покупки
 
         Returns:
             Словарь с результатами бэктестинга
         """
-        # Объединение данных по датам
-        price_data['date'] = price_data['timestamp'].dt.date
+        # Подготовка данных - объединяем все цены в один DataFrame
         fng_data['date'] = fng_data['timestamp'].dt.date
 
-        merged_data = pd.merge(
-            price_data,
-            fng_data[['date', 'fear_greed_index']],
-            on='date',
-            how='inner'
-        )
+        # Создаем общую временную шкалу
+        all_dates = set()
+        for df in coins_data.values():
+            df['date'] = df['timestamp'].dt.date
+            all_dates.update(df['date'].tolist())
 
         # Инициализация переменных
         cash = self.initial_capital
-        btc_holdings = 0.0
+        portfolio = {}  # {symbol: amount}
         trades = []
         portfolio_values = []
         in_position = False
 
-        # Симуляция торговли
-        for idx, row in merged_data.iterrows():
-            date = row['timestamp']
-            price = row['close']
-            fng_index = row['fear_greed_index']
+        # Сортируем даты
+        sorted_dates = sorted(all_dates)
 
-            # Расчет текущей стоимости портфеля
-            portfolio_value = cash + (btc_holdings * price)
+        # Симуляция торговли
+        for current_date in sorted_dates:
+            # Получаем индекс страха и жадности для текущей даты
+            fng_row = fng_data[fng_data['date'] == current_date]
+            if fng_row.empty:
+                continue
+
+            fng_index = fng_row.iloc[0]['fear_greed_index']
+            timestamp = fng_row.iloc[0]['timestamp']
+
+            # Получаем текущие цены всех монет
+            current_prices = {}
+            for symbol, df in coins_data.items():
+                price_row = df[df['date'] == current_date]
+                if not price_row.empty:
+                    current_prices[symbol] = price_row.iloc[0]['close']
+
+            # Расчет стоимости портфеля
+            portfolio_value = cash
+            for symbol, amount in portfolio.items():
+                if symbol in current_prices:
+                    portfolio_value += amount * current_prices[symbol]
+
             portfolio_values.append({
-                'date': date,
+                'date': timestamp,
                 'portfolio_value': portfolio_value,
-                'btc_price': price,
                 'fng_index': fng_index,
                 'cash': cash,
-                'btc_holdings': btc_holdings
+                'positions': len(portfolio)
             })
 
-            # Сигнал на покупку: индекс < 20 и нет позиции
-            if fng_index < self.buy_threshold and not in_position and cash > 0:
-                btc_amount = cash / price
-                trades.append({
-                    'date': date,
-                    'type': 'BUY',
-                    'price': price,
-                    'amount': btc_amount,
-                    'value': cash,
-                    'fng_index': fng_index
-                })
-                btc_holdings = btc_amount
-                cash = 0
+            # Сигнал на покупку: индекс == 20 и нет позиции
+            if fng_index == self.buy_threshold and not in_position and cash > 0:
+                # Покупаем топ-20 монет по 5% капитала на каждую
+                amount_per_coin = cash * self.allocation_per_coin
+
+                coins_bought = []
+                total_spent = 0
+
+                for symbol in top_coins:
+                    if symbol in current_prices:
+                        price = current_prices[symbol]
+                        coin_amount = amount_per_coin / price
+                        portfolio[symbol] = coin_amount
+
+                        trades.append({
+                            'date': timestamp,
+                            'type': 'BUY',
+                            'symbol': symbol,
+                            'price': price,
+                            'amount': coin_amount,
+                            'value': amount_per_coin,
+                            'fng_index': fng_index
+                        })
+
+                        coins_bought.append(symbol)
+                        total_spent += amount_per_coin
+
+                cash -= total_spent
                 in_position = True
+                print(f"   📈 {timestamp.strftime('%Y-%m-%d')}: Куплено {len(coins_bought)} монет при индексе {fng_index}")
 
-            # Сигнал на продажу: индекс > 80 и есть позиция
-            elif fng_index > self.sell_threshold and in_position and btc_holdings > 0:
-                sell_value = btc_holdings * price
-                trades.append({
-                    'date': date,
-                    'type': 'SELL',
-                    'price': price,
-                    'amount': btc_holdings,
-                    'value': sell_value,
-                    'fng_index': fng_index
-                })
-                cash = sell_value
-                btc_holdings = 0
+            # Сигнал на продажу: индекс == 80 и есть позиции
+            elif fng_index == self.sell_threshold and in_position and portfolio:
+                total_received = 0
+                coins_sold = []
+
+                for symbol, amount in portfolio.items():
+                    if symbol in current_prices:
+                        price = current_prices[symbol]
+                        sell_value = amount * price
+
+                        trades.append({
+                            'date': timestamp,
+                            'type': 'SELL',
+                            'symbol': symbol,
+                            'price': price,
+                            'amount': amount,
+                            'value': sell_value,
+                            'fng_index': fng_index
+                        })
+
+                        total_received += sell_value
+                        coins_sold.append(symbol)
+
+                cash += total_received
+                portfolio = {}
                 in_position = False
+                print(f"   📉 {timestamp.strftime('%Y-%m-%d')}: Продано {len(coins_sold)} монет при индексе {fng_index}")
 
-        # Закрытие позиции в конце периода, если она открыта
-        if btc_holdings > 0:
-            final_price = merged_data.iloc[-1]['close']
-            final_value = btc_holdings * final_price
-            trades.append({
-                'date': merged_data.iloc[-1]['timestamp'],
-                'type': 'SELL (Final)',
-                'price': final_price,
-                'amount': btc_holdings,
-                'value': final_value,
-                'fng_index': merged_data.iloc[-1]['fear_greed_index']
-            })
-            cash = final_value
-            btc_holdings = 0
+        # Закрытие позиций в конце периода
+        if portfolio:
+            final_date = sorted_dates[-1]
+            fng_row = fng_data[fng_data['date'] == final_date]
+            final_fng = fng_row.iloc[0]['fear_greed_index'] if not fng_row.empty else 50
+            final_timestamp = fng_row.iloc[0]['timestamp'] if not fng_row.empty else timestamp
+
+            total_received = 0
+            for symbol, amount in portfolio.items():
+                if symbol in coins_data:
+                    final_price_row = coins_data[symbol][coins_data[symbol]['date'] == final_date]
+                    if not final_price_row.empty:
+                        final_price = final_price_row.iloc[0]['close']
+                        sell_value = amount * final_price
+
+                        trades.append({
+                            'date': final_timestamp,
+                            'type': 'SELL (Final)',
+                            'symbol': symbol,
+                            'price': final_price,
+                            'amount': amount,
+                            'value': sell_value,
+                            'fng_index': final_fng
+                        })
+
+                        total_received += sell_value
+
+            cash += total_received
+            portfolio = {}
 
         return {
             'trades': trades,
             'portfolio_values': portfolio_values,
-            'final_capital': cash,
-            'merged_data': merged_data
+            'final_capital': cash
         }
 
-    def calculate_statistics(self, backtest_results: Dict, price_data: pd.DataFrame) -> Dict:
+    def calculate_statistics(self, backtest_results: Dict, coins_data: Dict[str, pd.DataFrame]) -> Dict:
         """Расчет детальной статистики торговли"""
         trades = backtest_results['trades']
         portfolio_values = pd.DataFrame(backtest_results['portfolio_values'])
 
         # Основные метрики
-        total_trades = len([t for t in trades if t['type'] in ['BUY', 'SELL']])
         buy_trades = [t for t in trades if t['type'] == 'BUY']
         sell_trades = [t for t in trades if t['type'].startswith('SELL')]
 
-        # Расчет прибыльных сделок
-        profitable_trades = 0
+        # Группируем сделки по циклам покупка-продажа
+        unique_dates_buy = list(set([t['date'] for t in buy_trades]))
+        unique_dates_sell = list(set([t['date'] for t in sell_trades]))
+
+        trade_cycles = min(len(unique_dates_buy), len(unique_dates_sell))
+
+        # Расчет прибыльности по циклам
+        profitable_cycles = 0
         total_profit = 0
         total_loss = 0
 
-        for i in range(len(buy_trades)):
-            if i < len(sell_trades):
-                buy_price = buy_trades[i]['price']
-                sell_price = sell_trades[i]['price']
-                profit = (sell_price - buy_price) / buy_price * 100
+        for i in range(trade_cycles):
+            buy_date = sorted(unique_dates_buy)[i]
+            sell_date = sorted(unique_dates_sell)[i]
 
-                if profit > 0:
-                    profitable_trades += 1
-                    total_profit += profit
-                else:
-                    total_loss += abs(profit)
+            buy_value = sum([t['value'] for t in buy_trades if t['date'] == buy_date])
+            sell_value = sum([t['value'] for t in sell_trades if t['date'] == sell_date])
 
-        win_rate = (profitable_trades / len(buy_trades) * 100) if buy_trades else 0
+            profit_pct = (sell_value - buy_value) / buy_value * 100
 
-        # Максимальная просадка (drawdown)
-        portfolio_values['peak'] = portfolio_values['portfolio_value'].cummax()
-        portfolio_values['drawdown'] = (portfolio_values['portfolio_value'] - portfolio_values['peak']) / portfolio_values['peak'] * 100
-        max_drawdown = portfolio_values['drawdown'].min()
+            if profit_pct > 0:
+                profitable_cycles += 1
+                total_profit += profit_pct
+            else:
+                total_loss += abs(profit_pct)
 
-        # HODL стратегия для сравнения
-        first_price = price_data.iloc[0]['close']
-        last_price = price_data.iloc[-1]['close']
-        hodl_btc = self.initial_capital / first_price
-        hodl_final_value = hodl_btc * last_price
-        hodl_return = (hodl_final_value - self.initial_capital) / self.initial_capital * 100
+        win_rate = (profitable_cycles / trade_cycles * 100) if trade_cycles > 0 else 0
+
+        # Максимальная просадка
+        if not portfolio_values.empty:
+            portfolio_values['peak'] = portfolio_values['portfolio_value'].cummax()
+            portfolio_values['drawdown'] = (portfolio_values['portfolio_value'] - portfolio_values['peak']) / portfolio_values['peak'] * 100
+            max_drawdown = portfolio_values['drawdown'].min()
+        else:
+            max_drawdown = 0
+
+        # HODL стратегия для BTC (для сравнения)
+        if 'BTC' in coins_data and not coins_data['BTC'].empty:
+            btc_data = coins_data['BTC']
+            first_price = btc_data.iloc[0]['close']
+            last_price = btc_data.iloc[-1]['close']
+            hodl_btc = self.initial_capital / first_price
+            hodl_final_value = hodl_btc * last_price
+            hodl_return = (hodl_final_value - self.initial_capital) / self.initial_capital * 100
+        else:
+            hodl_final_value = self.initial_capital
+            hodl_return = 0
 
         # Доходность стратегии
         strategy_return = (backtest_results['final_capital'] - self.initial_capital) / self.initial_capital * 100
 
         return {
-            'total_trades': total_trades,
+            'total_trades': len(trades),
             'buy_trades': len(buy_trades),
             'sell_trades': len(sell_trades),
-            'profitable_trades': profitable_trades,
+            'trade_cycles': trade_cycles,
+            'profitable_cycles': profitable_cycles,
             'win_rate': win_rate,
             'max_drawdown': max_drawdown,
             'initial_capital': self.initial_capital,
@@ -295,7 +481,7 @@ class TradingStrategy:
             'outperformance': strategy_return - hodl_return,
             'total_profit_pct': total_profit,
             'total_loss_pct': total_loss,
-            'avg_profit_per_trade': total_profit / profitable_trades if profitable_trades > 0 else 0,
+            'avg_profit_per_cycle': total_profit / profitable_cycles if profitable_cycles > 0 else 0,
             'portfolio_values': portfolio_values
         }
 
@@ -303,57 +489,81 @@ class TradingStrategy:
 def print_results(stats: Dict, trades: List):
     """Вывод результатов бэктестинга"""
     print("\n" + "="*80)
-    print("РЕЗУЛЬТАТЫ БЭКТЕСТИНГА ТОРГОВОЙ СТРАТЕГИИ")
+    print("РЕЗУЛЬТАТЫ БЭКТЕСТИНГА ТОРГОВОЙ СТРАТЕГИИ (TOP-20 ПОРТФЕЛЬ)")
     print("="*80)
 
     print("\n📊 ПАРАМЕТРЫ СТРАТЕГИИ:")
     print(f"   Стартовый капитал: ${stats['initial_capital']:,.2f}")
-    print(f"   Сигнал покупки: Индекс страха < 20 (Extreme Fear)")
-    print(f"   Сигнал продажи: Индекс страха > 80 (Extreme Greed)")
+    print(f"   Сигнал покупки: Индекс страха = 20 (Extreme Fear)")
+    print(f"   Сигнал продажи: Индекс страха = 80 (Extreme Greed)")
+    print(f"   Распределение: 5% капитала на каждую монету из топ-20")
 
     print("\n💰 ФИНАНСОВЫЕ РЕЗУЛЬТАТЫ:")
     print(f"   Финальный капитал: ${stats['final_capital']:,.2f}")
     print(f"   Прибыль стратегии: ${stats['final_capital'] - stats['initial_capital']:,.2f}")
     print(f"   Доходность стратегии: {stats['strategy_return']:.2f}%")
 
-    print("\n📈 СРАВНЕНИЕ С HODL:")
-    print(f"   HODL финальная стоимость: ${stats['hodl_final_value']:,.2f}")
-    print(f"   HODL доходность: {stats['hodl_return']:.2f}%")
-    print(f"   Превосходство над HODL: {stats['outperformance']:.2f}%")
+    print("\n📈 СРАВНЕНИЕ С HODL BTC:")
+    print(f"   HODL BTC финальная стоимость: ${stats['hodl_final_value']:,.2f}")
+    print(f"   HODL BTC доходность: {stats['hodl_return']:.2f}%")
+    print(f"   Превосходство над HODL BTC: {stats['outperformance']:.2f}%")
 
     if stats['outperformance'] > 0:
-        print(f"   ✅ Стратегия превзошла HODL на {stats['outperformance']:.2f}%")
+        print(f"   ✅ Стратегия превзошла HODL BTC на {stats['outperformance']:.2f}%")
     else:
-        print(f"   ❌ Стратегия уступила HODL на {abs(stats['outperformance']):.2f}%")
+        print(f"   ❌ Стратегия уступила HODL BTC на {abs(stats['outperformance']):.2f}%")
 
     print("\n📊 СТАТИСТИКА СДЕЛОК:")
     print(f"   Всего сделок: {stats['total_trades']}")
-    print(f"   Покупок: {stats['buy_trades']}")
-    print(f"   Продаж: {stats['sell_trades']}")
-    print(f"   Прибыльных сделок: {stats['profitable_trades']}")
+    print(f"   Циклов покупка-продажа: {stats['trade_cycles']}")
+    print(f"   Прибыльных циклов: {stats['profitable_cycles']}")
     print(f"   Win Rate: {stats['win_rate']:.2f}%")
-    print(f"   Средняя прибыль на сделку: {stats['avg_profit_per_trade']:.2f}%")
+    print(f"   Средняя прибыль на цикл: {stats['avg_profit_per_cycle']:.2f}%")
 
     print("\n⚠️  РИСКИ:")
     print(f"   Максимальная просадка: {stats['max_drawdown']:.2f}%")
 
-    print("\n📋 ДЕТАЛИ СДЕЛОК:")
+    # Группируем сделки по датам
+    print("\n📋 ЦИКЛЫ ТОРГОВЛИ:")
     print("-" * 80)
-    for i, trade in enumerate(trades, 1):
-        print(f"{i}. {trade['date'].strftime('%Y-%m-%d')} | {trade['type']:15} | "
-              f"Цена: ${trade['price']:,.2f} | "
-              f"Сумма: ${trade['value']:,.2f} | "
-              f"FG Index: {trade['fng_index']}")
+
+    buy_trades = [t for t in trades if t['type'] == 'BUY']
+    sell_trades = [t for t in trades if t['type'].startswith('SELL')]
+
+    buy_dates = sorted(set([t['date'] for t in buy_trades]))
+    sell_dates = sorted(set([t['date'] for t in sell_trades]))
+
+    for i, buy_date in enumerate(buy_dates):
+        buy_coins = [t for t in buy_trades if t['date'] == buy_date]
+        buy_value = sum([t['value'] for t in buy_coins])
+
+        print(f"\nЦикл {i+1}:")
+        print(f"  📈 ПОКУПКА {buy_date.strftime('%Y-%m-%d')}:")
+        print(f"     Куплено монет: {len(buy_coins)}")
+        print(f"     Общая сумма: ${buy_value:,.2f}")
+        print(f"     Монеты: {', '.join([t['symbol'] for t in buy_coins[:10]])}" +
+              (f"... (+{len(buy_coins)-10})" if len(buy_coins) > 10 else ""))
+
+        if i < len(sell_dates):
+            sell_date = sell_dates[i]
+            sell_coins = [t for t in sell_trades if t['date'] == sell_date]
+            sell_value = sum([t['value'] for t in sell_coins])
+            profit = sell_value - buy_value
+            profit_pct = (profit / buy_value) * 100
+
+            print(f"  📉 ПРОДАЖА {sell_date.strftime('%Y-%m-%d')}:")
+            print(f"     Продано монет: {len(sell_coins)}")
+            print(f"     Общая сумма: ${sell_value:,.2f}")
+            print(f"     Прибыль: ${profit:,.2f} ({profit_pct:+.2f}%)")
 
     print("\n" + "="*80)
 
 
 def main():
     """Основная функция"""
-    print("🚀 Запуск бэктестинга торговой стратегии...")
+    print("🚀 Запуск бэктестинга торговой стратегии с TOP-20 портфелем...")
 
     # Параметры
-    symbol = "BTCUSDT"
     interval = "1d"
     start_date = "2020-01-01"
     end_date = "2025-12-01"
@@ -367,13 +577,22 @@ def main():
 
     print(f"\n📅 Период: {start_date} - {end_date}")
     print(f"💵 Стартовый капитал: ${initial_capital}")
+    print(f"📊 Стратегия: покупка топ-20 монет по 5% каждая")
 
-    # Получение данных с Binance
-    print(f"\n📊 Получение данных BTCUSDT с Binance...")
-    binance = BinanceAPI()
-    klines = binance.get_historical_klines(symbol, interval, start_timestamp, end_timestamp)
-    price_data = binance.klines_to_dataframe(klines)
-    print(f"✅ Получено {len(price_data)} дневных свечей")
+    # Получение топ-20 монет
+    print(f"\n🏆 Получение топ-20 монет (без стейблкоинов)...")
+    coingecko = CoinGeckoAPI()
+    top_coins = coingecko.get_top_coins(datetime.now(), limit=50)
+    print(f"✅ Топ-20 монет: {', '.join(top_coins)}")
+
+    # Получение данных для всех монет
+    print(f"\n📊 Получение исторических данных для {len(top_coins)} монет с Binance...")
+    coins_data = BinanceAPI.get_multiple_coins_data(top_coins, interval, start_timestamp, end_timestamp)
+    print(f"✅ Загружено данных для {len(coins_data)} монет")
+
+    if not coins_data:
+        print("❌ Не удалось загрузить данные монет. Проверьте подключение к интернету.")
+        return
 
     # Получение данных Fear & Greed Index
     print(f"\n😱 Получение данных индекса страха и жадности...")
@@ -381,34 +600,39 @@ def main():
     fng_data = fng_api.get_historical_data(limit=0)
     print(f"✅ Получено {len(fng_data)} записей индекса")
 
+    if fng_data.empty:
+        print("❌ Не удалось загрузить данные индекса страха и жадности.")
+        return
+
     # Выполнение бэктестинга
     print(f"\n⚡ Выполнение бэктестинга стратегии...")
-    strategy = TradingStrategy(initial_capital, buy_threshold, sell_threshold)
-    backtest_results = strategy.backtest(price_data, fng_data)
+    strategy = PortfolioTradingStrategy(initial_capital, buy_threshold, sell_threshold)
+    backtest_results = strategy.backtest(coins_data, fng_data, top_coins)
 
     # Расчет статистики
     print(f"\n📈 Расчет статистики...")
-    stats = strategy.calculate_statistics(backtest_results, price_data)
+    stats = strategy.calculate_statistics(backtest_results, coins_data)
 
     # Вывод результатов
     print_results(stats, backtest_results['trades'])
 
-    # Сохранение результатов в JSON
-    output_file = "backtesting_results.json"
+    # Сохранение результатов
+    output_file = "backtesting_results_top20.json"
     results_to_save = {
         'parameters': {
-            'symbol': symbol,
+            'top_coins': top_coins,
             'start_date': start_date,
             'end_date': end_date,
             'initial_capital': initial_capital,
             'buy_threshold': buy_threshold,
-            'sell_threshold': sell_threshold
+            'sell_threshold': sell_threshold,
+            'allocation_per_coin': 0.05
         },
         'statistics': {k: v for k, v in stats.items() if k != 'portfolio_values'},
         'trades': backtest_results['trades']
     }
 
-    # Конвертация datetime объектов в строки
+    # Конвертация datetime в строки
     for trade in results_to_save['trades']:
         trade['date'] = trade['date'].strftime('%Y-%m-%d %H:%M:%S')
 
@@ -417,10 +641,11 @@ def main():
 
     print(f"\n💾 Результаты сохранены в файл: {output_file}")
 
-    # Сохранение CSV с историей портфеля
-    csv_file = "portfolio_history.csv"
-    stats['portfolio_values'].to_csv(csv_file, index=False)
-    print(f"💾 История портфеля сохранена в файл: {csv_file}")
+    # Сохранение CSV
+    if not stats['portfolio_values'].empty:
+        csv_file = "portfolio_history_top20.csv"
+        stats['portfolio_values'].to_csv(csv_file, index=False)
+        print(f"💾 История портфеля сохранена в файл: {csv_file}")
 
     print("\n✅ Бэктестинг завершен успешно!")
 
